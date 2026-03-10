@@ -1,51 +1,186 @@
 import cv2
+import numpy as np
+import pyttsx3
+import time
+import psutil
 
-Known_distance = 76.2   # cm
-Known_width = 14.3      # cm
+from yolo_utils import infer_image
+from customdata import REAL_WIDTHS
 
-GREEN = (0, 255, 0)
-RED = (0, 0, 255)
-BLACK = (0, 0, 0)
-fonts = cv2.FONT_HERSHEY_COMPLEX
 
-face_detector = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
+CONF_THRESHOLD = 0.5
+NMS_THRESHOLD = 0.4
+FOCAL_LENGTH = 900
+ENABLE_SPEECH = True
 
-def Focal_Length_Finder(measured_distance, real_width, width_in_rf_image):
-    return (width_in_rf_image * measured_distance) / real_width
 
-def Distance_finder(Focal_Length, real_face_width, face_width_in_frame):
-    return (real_face_width * Focal_Length) / face_width_in_frame
+def load_yolo():
 
-def face_data(image):
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    faces = face_detector.detectMultiScale(gray, 1.3, 5)
-    for (x, y, h, w) in faces:
-        cv2.rectangle(image, (x, y), (x+w, y+h), GREEN, 2)
-        return w
-    return 0
+    labels = open("coco.names").read().strip().split("\n")
 
-ref_image = cv2.imread("reference_image.png")
-ref_face_width = face_data(ref_image)
-Focal_length_found = Focal_Length_Finder(Known_distance, Known_width, ref_face_width)
-print(Focal_length_found)
-cv2.imshow("ref_image", ref_image)
+    net = cv2.dnn.readNetFromDarknet("yolov3.cfg", "yolov3.weights")
 
-cap = cv2.VideoCapture(0)
+    layer_names = net.getLayerNames()
 
-while True:
-    _, frame = cap.read()
-    face_width_in_frame = face_data(frame)
+    output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
 
-    if face_width_in_frame != 0:
-        Distance = Distance_finder(Focal_length_found, Known_width, face_width_in_frame)
-        cv2.line(frame, (30, 30), (230, 30), RED, 32)
-        cv2.line(frame, (30, 30), (230, 30), BLACK, 28)
-        cv2.putText(frame, f"Distance: {round(Distance, 2)} CM", (30, 35), fonts, 0.6, GREEN, 2)
+    colors = np.random.uniform(0, 255, size=(len(labels), 3))
 
-    cv2.imshow("Distance Calculation", frame)
+    return net, labels, colors, output_layers
 
-    if cv2.waitKey(1) == ord("q"):
-        break
 
-cap.release()
-cv2.destroyAllWindows()
+def speak(text, engine):
+
+    start = time.time()
+
+    engine.say(text)
+    engine.runAndWait()
+
+    latency = time.time() - start
+    print(f"[Speech latency]: {latency:.3f} sec")
+
+
+def main():
+
+    class FLAGS:
+        confidence = CONF_THRESHOLD
+        threshold = NMS_THRESHOLD
+        show_time = False
+
+
+    net, labels, colors, output_layers = load_yolo()
+
+    focal_length = FOCAL_LENGTH
+
+    print(f"[INFO] Using focal length: {focal_length:.2f}")
+
+
+    cap = cv2.VideoCapture(0)
+
+    if not cap.isOpened():
+        print("[ERROR] Cannot open webcam.")
+        return
+
+
+    engine = pyttsx3.init() if ENABLE_SPEECH else None
+    last_speech = 0
+
+
+    # Metrics
+    total_conf = 0
+    total_detections = 0
+
+
+    print("[INFO] Starting webcam. Press 'q' to quit.")
+
+
+    while True:
+
+        start_time = time.time()
+
+        ret, frame = cap.read()
+
+        if not ret:
+            break
+
+
+        h, w = frame.shape[:2]
+
+        frame, boxes, confs, classids, idxs = infer_image(
+            net, output_layers, h, w, frame, colors, labels, FLAGS
+        )
+
+
+        if len(boxes) > 0:
+
+            for i in range(len(boxes)):
+
+                label = labels[classids[i]].lower().strip()
+
+                x, y, bw, bh = boxes[i]
+
+                confidence = confs[i]
+
+                total_conf += confidence
+                total_detections += 1
+
+
+                if label in REAL_WIDTHS:
+
+                    real_width = REAL_WIDTHS[label]
+
+                    distance = (real_width * focal_length) / bw
+
+                    distance_m = distance / 100
+
+
+                    cv2.putText(
+                        frame,
+                        f"{label} {confidence:.2f} | {distance_m:.2f} m",
+                        (x, y - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0, 255, 0),
+                        2,
+                    )
+
+
+                    if ENABLE_SPEECH and time.time() - last_speech > 2:
+
+                        speak(f"{label} at {distance_m:.1f} meters", engine)
+
+                        last_speech = time.time()
+
+
+        # ---------- PERFORMANCE METRICS ----------
+
+        end_time = time.time()
+
+        fps = 1 / (end_time - start_time)
+
+
+        cpu = psutil.cpu_percent()
+        ram = psutil.virtual_memory().percent
+
+
+        cv2.putText(frame, f"FPS: {fps:.2f}", (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+        cv2.putText(frame, f"CPU: {cpu}%", (10, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+        cv2.putText(frame, f"RAM: {ram}%", (10, 75),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+
+        cv2.imshow(
+            "Object Detection and Audio Assistance for Visually Impaired",
+            frame
+        )
+
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
+
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+    # -------- FINAL METRICS --------
+
+    if total_detections > 0:
+
+        avg_conf = total_conf / total_detections
+
+        print("\n=========== SYSTEM METRICS ===========")
+
+        print(f"Total detections: {total_detections}")
+
+        print(f"Average confidence: {avg_conf:.3f}")
+
+        print("=======================================")
+
+
+if __name__ == "__main__":
+    main()
