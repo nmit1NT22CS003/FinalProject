@@ -11,7 +11,8 @@ A real-time computer vision system that detects objects via webcam, estimates th
 
 ## 📸 Demo
 
-![Reference Detection](reference_image.png)
+![Reference Detection](<img width="366" height="313" alt="Screenshot From 2026-03-09 20-37-01" src="https://github.com/user-attachments/assets/e9c98fea-3879-4671-bb8d-3472cb6aae17" />
+)
 
 > Face detected with bounding box overlay. The system announces detected objects and their estimated distances in real time.
 
